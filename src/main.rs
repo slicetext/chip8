@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
-use std::{fs::File, io::{self, BufReader, Read}};
+use std::{cmp, fs::File, io::{self, BufReader, Read}, u16};
 
-use rand::RngCore;
+use ::rand::Rng;
+use macroquad::prelude::*;
 
 
 const START_ADDRESS: u16 = 0x200;
@@ -25,13 +26,33 @@ struct Chip8 {
     video:     [u32; 64 * 32],
     opcode:    u16,
     // RNG
-    rng: dyn RngCore,
 
 }
 impl Chip8 {
-    fn new(&mut self) {
-        // Set program counter to the start address
-        self.pc = START_ADDRESS;
+    fn new() -> Self {
+        let reg: [u8; 16] = [0;16];
+        let mem: [u8; 4096] = [0; 4096];
+        let stck: [u16; 16] = [0; 16];
+        let kpad: [u8; 16] = [0;16];
+        let vdeo: [u32; 64 * 32] = [0;64*32];
+        let mut c = Chip8 {
+            registers: reg,
+            memory: mem,
+            index: 0,
+            pc: 0,
+            stack: stck,
+            sp: 0,
+            delay_timer: 0,
+            sound_timer: 0,
+            keypad: kpad,
+            video: vdeo,
+            opcode: 0,
+
+        };
+        c.init();
+        return c;
+    }
+    fn init(&mut self) {
         // Create font
         let fontset: [usize; FONTSET_SIZE as usize] =
         [
@@ -67,6 +88,7 @@ impl Chip8 {
         for i in 0..buffer.len() {
             self.memory[i + START_ADDRESS as usize]=buffer[i];
         }
+        self.pc=START_ADDRESS;
         return Ok(());
     }
     // Instructions
@@ -125,7 +147,7 @@ impl Chip8 {
     fn OP_7xkk(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let byte: u16 = self.opcode & 0x00FF;
-        self.registers[Vx as usize] += byte as u8;
+        self.registers[Vx as usize] =u8::MAX.wrapping_add(self.registers[Vx as usize]).wrapping_add(byte as u8);
     }
     // Set Vx = Vy
     fn OP_8xy0(&mut self) {
@@ -155,7 +177,8 @@ impl Chip8 {
     fn OP_8xy4(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
-        let sum: u16 = (self.registers[Vx as usize] + self.registers[Vy as usize]).into();
+        let i: u16=u16::MAX;
+        let sum: u16 = i.wrapping_add(self.registers[Vx as usize].into()).wrapping_add(self.registers[Vy as usize].into());
 
         if sum > 255 {
             self.registers[0xF] = 1;
@@ -174,7 +197,7 @@ impl Chip8 {
         } else {
             self.registers[0xF] = 0;
         }
-        self.registers[Vx as usize] -= self.registers[Vy as usize];
+        self.registers[Vx as usize] = u8::MAX.wrapping_sub(self.registers[Vx as usize]).wrapping_sub(self.registers[Vy as usize]);
     }
     // Set Vx >>= 1
     fn OP_8xy6(&mut self) {
@@ -195,7 +218,7 @@ impl Chip8 {
         } else {
             self.registers[0xF] = 0;
         }
-        self.registers[Vx as usize] = self.registers[Vy as usize] - self.registers[Vx as usize];
+        self.registers[Vx as usize] = u8::MAX.wrapping_sub(self.registers[Vy as usize]).wrapping_sub(self.registers[Vx as usize]);
     }
     // Set Vx <<= 1
     fn OP_8xyE(&mut self) {
@@ -231,7 +254,7 @@ impl Chip8 {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let byte: u16 = self.opcode & 0x00FF;
 
-        self.registers[Vx as usize] = (self.rng.next_u32() as u16 & byte) as u8;
+        self.registers[Vx as usize] = (rand::rand() as u16 & byte) as u8;
     }
     // Display sprite starting at memory location I at (Vx, Vy), set VF = collision
     fn OP_Dxyn(&mut self) {
@@ -350,7 +373,103 @@ impl Chip8 {
             self.registers[i as usize] = self.memory[(self.index+i) as usize];
         }
     }
+    fn OP_NULL(&mut self, instruction: &u16) {
+        println!("Invalid instruction: {:#06x} ({})",instruction,instruction);
+    }
+    // Call Instruction's function
+    fn do_instruction(&mut self) {
+        let instruction = self.opcode;
+        println!("{:#06x} ({})",instruction,instruction);
+        match (instruction & 0xF000) >> 12 {
+            0 => {
+                match instruction & 0x000F {
+                    0 => self.OP_00E0(),
+                    14=> self.OP_00EE(),
+                    _ => self.OP_NULL(&instruction),
+                }
+            },
+            1 => self.OP_1nnn(),
+            2 => self.OP_2nnn(),
+            3 => self.OP_3xkk(),
+            4 => self.OP_4xkk(),
+            5 => self.OP_5xy0(),
+            6 => self.OP_6xkk(),
+            7 => self.OP_7xkk(),
+            8 => {
+                match instruction & 0x000F {
+                    0 => self.OP_8xy0(),
+                    1 => self.OP_8xy1(),
+                    2 => self.OP_8xy2(),
+                    3 => self.OP_8xy3(),
+                    4 => self.OP_8xy4(),
+                    5 => self.OP_8xy5(),
+                    6 => self.OP_8xy6(),
+                    7 => self.OP_8xy7(),
+                    14=> self.OP_8xyE(),
+                    _ => self.OP_NULL(&instruction),
+                }
+            },
+            9 => self.OP_9xy0(),
+            10=> self.OP_Annn(),
+            11=> self.OP_Bnnn(),
+            12=> self.OP_Cxkk(),
+            13=> self.OP_Dxyn(),
+            14=> {
+                match instruction & 0x00FF {
+                    158 => self.OP_Ex9E(),
+                    161 => self.OP_ExA1(),
+                    _   => self.OP_NULL(&instruction),
+                }
+            },
+            15=> {
+                match instruction & 0x00FF {
+                    7   => self.OP_Fx07(),
+                    10  => self.OP_Fx0A(),
+                    21  => self.OP_Fx15(),
+                    24  => self.OP_Fx18(),
+                    30  => self.OP_Fx1E(),
+                    41  => self.OP_Fx29(),
+                    51  => self.OP_Fx33(),
+                    85  => self.OP_Fx55(),
+                    101 => self.OP_Fx65(),
+                    _   => self.OP_NULL(&instruction),
+                }
+            },
+            _ => self.OP_NULL(&instruction),
+        }
+    }
+    fn cycle(&mut self) {
+        // self.opcode = ((self.memory[self.pc as usize] << 8) | self.memory[(self.pc+1) as usize]) as u16;
+        self.opcode = ((self.memory[self.pc as usize] as u16) << 8) | self.memory[(self.pc+1) as usize] as u16;
+
+        self.pc += 2;
+
+        self.do_instruction();
+
+        if self.delay_timer > 0 {
+            self.delay_timer-=1;
+        }
+        if self.sound_timer > 0 {
+            self.sound_timer-=1;
+        }
+    }
 }
-fn main() {
-    println!("Hello, world!");
+#[macroquad::main("Chip8")]
+async fn main() {
+    let mut chip8 = Chip8::new();
+    chip8.load_rom("/home/owner/Projects/emulator/roms/corax.ch8").expect("Failed to load file");
+    loop{
+        chip8.cycle();
+        clear_background(BLACK);
+        for i in 0..VIDEO_WIDTH {
+            for j in 0..VIDEO_HEIGHT {
+                if chip8.video[(i as usize+(j as usize*VIDEO_WIDTH as usize)) as usize] != 0x0 {
+                    let screen_size=cmp::min(screen_width() as u32, screen_height() as u32);
+                    let pixel_size=80;
+                    draw_rectangle(i as f32*(screen_size/64)as f32, j as f32*(screen_size/32)as f32, (screen_size/pixel_size)as f32, (screen_size/pixel_size)as f32, WHITE);
+                }
+            }
+        }
+        next_frame().await
+    }
 }
