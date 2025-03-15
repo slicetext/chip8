@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
-use std::{cmp, env, fs::File, io::{self, BufReader, Read}, u16};
+use std::{cmp, env, fs::File, io::{self, BufReader, Read}, thread, u16};
+use rodio::Sink;
 
 use macroquad::prelude::*;
 
@@ -12,8 +13,12 @@ const FONTSET_START_ADDRESS: usize = 0x50;
 const VIDEO_WIDTH: u8 = 64;
 const VIDEO_HEIGHT: u8 = 32;
 
+const INSTRUCTIONS_PER_FRAME: u8 = 10;
+
 const COLOR_BG: Color = DARKGREEN;
 const COLOR_MAIN: Color = GREEN;
+
+const BEEP_AUDIO_FREQUENCY: u32 = 440;
 
 struct Chip8 {
     registers: [u8; 16],
@@ -27,7 +32,8 @@ struct Chip8 {
     keypad:    [u8; 16],
     video:     [u32; 64 * 32],
     opcode:    u16,
-    // RNG
+    // Audio
+    sink: Sink,
 
 }
 impl Chip8 {
@@ -37,6 +43,9 @@ impl Chip8 {
         let stck: [u16; 16] = [0; 16];
         let kpad: [u8; 16] = [0;16];
         let vdeo: [u32; 64 * 32] = [0;64*32];
+        // audio
+        let device = rodio::default_output_device().unwrap();
+        let sink = Sink::new(&device);
         let mut c = Chip8 {
             registers: reg,
             memory: mem,
@@ -49,6 +58,7 @@ impl Chip8 {
             keypad: kpad,
             video: vdeo,
             opcode: 0,
+            sink,
 
         };
         c.init();
@@ -79,6 +89,10 @@ impl Chip8 {
         for i in 0usize..FONTSET_SIZE as usize {
             self.memory[FONTSET_START_ADDRESS + i] = fontset[i] as u8;
         }
+        // Add beep to sink
+        let source = rodio::source::SineWave::new(BEEP_AUDIO_FREQUENCY);
+        self.sink.append(source);
+        self.sink.pause();
     }
     fn load_rom(&mut self, filename: &str) -> io::Result<()> {
         // Read file to buffer
@@ -226,10 +240,11 @@ impl Chip8 {
     fn OP_8xyE(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
+        self.registers[Vx as usize] <<= 1;
+
         // Save Most Significant Bit in VF
         self.registers[0xF] = (self.registers[Vx as usize] & 0x80) >> 7;
 
-        self.registers[Vx as usize] <<= 1;
     }
     // Skip next instruction if Vx != Vy
     fn OP_9xy0(&mut self) {
@@ -444,6 +459,7 @@ impl Chip8 {
         }
     }
     fn cycle(&mut self) {
+        // Audio
         // self.opcode = ((self.memory[self.pc as usize] << 8) | self.memory[(self.pc+1) as usize]) as u16;
         self.opcode = ((self.memory[self.pc as usize] as u16) << 8) | self.memory[(self.pc+1) as usize] as u16;
 
@@ -455,7 +471,10 @@ impl Chip8 {
             self.delay_timer-=1;
         }
         if self.sound_timer > 0 {
+            self.sink.play();
             self.sound_timer-=1;
+        } else {
+            self.sink.pause();
         }
     }
 }
@@ -557,6 +576,18 @@ fn do_kbd_input(chip8: &mut Chip8) {
         chip8.keypad[0xF] = 0;
     }
 }
+async fn do_graphics(vid_buffer: [u32; 64*32]) {
+    clear_background(COLOR_BG);
+    for i in 0..VIDEO_WIDTH {
+        for j in 0..VIDEO_HEIGHT {
+            if vid_buffer[(i as usize+(j as usize*VIDEO_WIDTH as usize)) as usize] != 0x0 {
+                let screen_size=cmp::min(screen_width() as u32, screen_height() as u32);
+                let pixel_size=70;
+                draw_rectangle(i as f32*(screen_size/64)as f32, j as f32*(screen_size/64)as f32, (screen_size/pixel_size)as f32, (screen_size/pixel_size)as f32, COLOR_MAIN);
+            }
+        }
+    }
+}
 #[macroquad::main("Chip8")]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -564,17 +595,10 @@ async fn main() {
     let mut chip8 = Chip8::new();
     chip8.load_rom(&file).expect("Failed to load file");
     loop{
-        do_kbd_input(&mut chip8);
-        chip8.cycle();
-        clear_background(COLOR_BG);
-        for i in 0..VIDEO_WIDTH {
-            for j in 0..VIDEO_HEIGHT {
-                if chip8.video[(i as usize+(j as usize*VIDEO_WIDTH as usize)) as usize] != 0x0 {
-                    let screen_size=cmp::min(screen_width() as u32, screen_height() as u32);
-                    let pixel_size=70;
-                    draw_rectangle(i as f32*(screen_size/64)as f32, j as f32*(screen_size/64)as f32, (screen_size/pixel_size)as f32, (screen_size/pixel_size)as f32, COLOR_MAIN);
-                }
-            }
+        do_graphics(chip8.video).await;
+        for _ in 0..INSTRUCTIONS_PER_FRAME {
+            do_kbd_input(&mut chip8);
+            chip8.cycle();
         }
         next_frame().await
     }
