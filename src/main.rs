@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use std::{cmp, env, fs::File, io::{self, BufReader, Read}, thread, u16};
+use std::{cmp, env, fs::File, io::{self, BufReader, Read}};
 use rodio::Sink;
 
 use macroquad::prelude::*;
@@ -92,7 +92,6 @@ impl Chip8 {
         // Add beep to sink
         let source = rodio::source::SineWave::new(BEEP_AUDIO_FREQUENCY);
         self.sink.append(source);
-        self.sink.pause();
     }
     fn load_rom(&mut self, filename: &str) -> io::Result<()> {
         // Read file to buffer
@@ -176,18 +175,21 @@ impl Chip8 {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         self.registers[Vx as usize] |= self.registers[Vy as usize];
+        self.registers[0xF] = 0;
     }
     // Set Vx = Vx AND Vy
     fn OP_8xy2(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         self.registers[Vx as usize] &= self.registers[Vy as usize];
+        self.registers[0xF] = 0;
     }
     // Set Vx = Vx XOR Vy
     fn OP_8xy3(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         self.registers[Vx as usize] ^= self.registers[Vy as usize];
+        self.registers[0xF] = 0;
     }
     // Set Vx += Vy. set VF = carry
     fn OP_8xy4(&mut self) {
@@ -383,7 +385,8 @@ impl Chip8 {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
         for i in 0..=Vx {
-            self.memory[(self.index+i) as usize] = self.registers[i as usize];
+            self.memory[(self.index) as usize] = self.registers[i as usize];
+            self.index += 1;
         }
     }
     // Read registers V0 through Vx from memory starting at location I
@@ -391,7 +394,8 @@ impl Chip8 {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
         for i in 0..=Vx {
-            self.registers[i as usize] = self.memory[(self.index+i) as usize];
+            self.registers[i as usize] = self.memory[(self.index) as usize];
+            self.index += 1;
         }
     }
     fn OP_NULL(&mut self, instruction: &u16) {
@@ -466,15 +470,17 @@ impl Chip8 {
         self.pc += 2;
 
         self.do_instruction();
+    }
+    fn do_sound(&mut self) {
 
         if self.delay_timer > 0 {
             self.delay_timer-=1;
         }
         if self.sound_timer > 0 {
-            self.sink.play();
+            self.sink.set_volume(100.0);
             self.sound_timer-=1;
         } else {
-            self.sink.pause();
+            self.sink.set_volume(0.0);
         }
     }
 }
@@ -596,6 +602,7 @@ async fn main() {
     chip8.load_rom(&file).expect("Failed to load file");
     loop{
         do_graphics(chip8.video).await;
+        chip8.do_sound();
         for _ in 0..INSTRUCTIONS_PER_FRAME {
             do_kbd_input(&mut chip8);
             chip8.cycle();
