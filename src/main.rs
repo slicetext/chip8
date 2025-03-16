@@ -528,7 +528,7 @@ fn do_kbd_input(chip8: &mut Chip8) {
         chip8.keypad[6] = 0;
     }
     // A
-    if is_key_down(KeyCode::Q)  {
+    if is_key_down(KeyCode::A)  {
         chip8.keypad[7] = 1;
     } else {
         chip8.keypad[7] = 0;
