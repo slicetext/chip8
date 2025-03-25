@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
-use std::{cmp, fs::File, io::{self, BufReader, Read}, u16};
+use std::{cmp, env, fs::File, io::{self, BufReader, Read}};
+use rodio::Sink;
 
 use macroquad::prelude::*;
 
@@ -12,8 +13,12 @@ const FONTSET_START_ADDRESS: usize = 0x50;
 const VIDEO_WIDTH: u8 = 64;
 const VIDEO_HEIGHT: u8 = 32;
 
+const INSTRUCTIONS_PER_FRAME: u8 = 10;
+
 const COLOR_BG: Color = DARKGREEN;
 const COLOR_MAIN: Color = GREEN;
+
+const BEEP_AUDIO_FREQUENCY: u32 = 440;
 
 struct Chip8 {
     registers: [u8; 16],
@@ -27,7 +32,8 @@ struct Chip8 {
     keypad:    [u8; 16],
     video:     [u32; 64 * 32],
     opcode:    u16,
-    // RNG
+    // Audio
+    sink: Sink,
 
 }
 impl Chip8 {
@@ -37,6 +43,9 @@ impl Chip8 {
         let stck: [u16; 16] = [0; 16];
         let kpad: [u8; 16] = [0;16];
         let vdeo: [u32; 64 * 32] = [0;64*32];
+        // audio
+        let device = rodio::default_output_device().unwrap();
+        let sink = Sink::new(&device);
         let mut c = Chip8 {
             registers: reg,
             memory: mem,
@@ -49,6 +58,7 @@ impl Chip8 {
             keypad: kpad,
             video: vdeo,
             opcode: 0,
+            sink,
 
         };
         c.init();
@@ -79,6 +89,9 @@ impl Chip8 {
         for i in 0usize..FONTSET_SIZE as usize {
             self.memory[FONTSET_START_ADDRESS + i] = fontset[i] as u8;
         }
+        // Add beep to sink
+        let source = rodio::source::SineWave::new(BEEP_AUDIO_FREQUENCY);
+        self.sink.append(source);
     }
     fn load_rom(&mut self, filename: &str) -> io::Result<()> {
         // Read file to buffer
@@ -162,73 +175,78 @@ impl Chip8 {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         self.registers[Vx as usize] |= self.registers[Vy as usize];
+        self.registers[0xF] = 0;
     }
     // Set Vx = Vx AND Vy
     fn OP_8xy2(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         self.registers[Vx as usize] &= self.registers[Vy as usize];
+        self.registers[0xF] = 0;
     }
     // Set Vx = Vx XOR Vy
     fn OP_8xy3(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         self.registers[Vx as usize] ^= self.registers[Vy as usize];
+        self.registers[0xF] = 0;
     }
     // Set Vx += Vy. set VF = carry
     fn OP_8xy4(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
         let sum: u16 = self.registers[Vx as usize].wrapping_add(self.registers[Vy as usize]) as u16;
+        self.registers[Vx as usize] = sum as u8 & 0xFF;
 
         if sum > 255 {
             self.registers[0xF] = 1;
         } else {
             self.registers[0xF] = 0;
         }
-        self.registers[Vx as usize] = sum as u8 & 0xFF;
     }
     // Set Vx -= Vy, set VF = NOT borrow
     fn OP_8xy5(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
 
-        if self.registers[Vx as usize] > self.registers[Vy as usize] {
+        self.registers[Vx as usize] = self.registers[Vx as usize].wrapping_sub(self.registers[Vy as usize]);
+        if self.registers[Vy as usize] > self.registers[Vx as usize] {
             self.registers[0xF] = 1;
         } else {
             self.registers[0xF] = 0;
         }
-        self.registers[Vx as usize] = self.registers[Vx as usize].wrapping_sub(self.registers[Vy as usize]);
     }
     // Set Vx >>= 1
     fn OP_8xy6(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
         // Least Significant Bit stored in VF
-        self.registers[0xF] = self.registers[Vx as usize] & 0x1;
-        
+        let lsb = self.registers[Vx as usize] & 0x1;
+
         self.registers[Vx as usize] >>= 1;
+        self.registers[0xF] = lsb;
     }
     // Set Vx = Vy - Vx, set VF = NOT borrow
     fn OP_8xy7(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
         let Vy: u16 = (self.opcode & 0x00F0) >> 4;
 
+        self.registers[Vx as usize] = self.registers[Vy as usize].wrapping_sub(self.registers[Vx as usize]);
         if self.registers[Vy as usize] > self.registers[Vx as usize] {
             self.registers[0xF] = 1;
         } else {
             self.registers[0xF] = 0;
         }
-        self.registers[Vx as usize] = self.registers[Vy as usize].wrapping_sub(self.registers[Vx as usize]);
     }
     // Set Vx <<= 1
     fn OP_8xyE(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
+        self.registers[Vx as usize] <<= 1;
+
         // Save Most Significant Bit in VF
         self.registers[0xF] = (self.registers[Vx as usize] & 0x80) >> 7;
 
-        self.registers[Vx as usize] <<= 1;
     }
     // Skip next instruction if Vx != Vy
     fn OP_9xy0(&mut self) {
@@ -275,7 +293,7 @@ impl Chip8 {
                 let spritePixel: u8 = sprite_byte & (0x80 >> col);
                 let index = ((yPos as u16 + row as u16) * VIDEO_WIDTH as u16 + (xPos as u16 + col as u16)) as usize;
                 let mut screenPixel: &mut u32=&mut 0;
-                if index<=2048{
+                if index<2048{
                     screenPixel = &mut self.video[index];
                 }
                 if spritePixel!=0x0 {
@@ -348,7 +366,7 @@ impl Chip8 {
     }
     // Store BCD (Binary Coded Decimal) representation of Vx in memory locations I, I+1, and I+2
     fn OP_Fx33(&mut self) {
-        let Vx: u16 = (self.opcode & 0x0F00) >> 8;
+        let Vx: u16 = (self.opcode & 0x0F00).wrapping_shr(8);
         let mut value: u8 = self.registers[Vx as usize];
 
         // Ones place
@@ -366,16 +384,18 @@ impl Chip8 {
     fn OP_Fx55(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
-        for i in 0..Vx {
-            self.memory[(self.index+i) as usize] = self.registers[i as usize];
+        for i in 0..=Vx {
+            self.memory[(self.index) as usize] = self.registers[i as usize];
+            self.index += 1;
         }
     }
     // Read registers V0 through Vx from memory starting at location I
     fn OP_Fx65(&mut self) {
         let Vx: u16 = (self.opcode & 0x0F00) >> 8;
 
-        for i in 0..Vx {
-            self.registers[i as usize] = self.memory[(self.index+i) as usize];
+        for i in 0..=Vx {
+            self.registers[i as usize] = self.memory[(self.index) as usize];
+            self.index += 1;
         }
     }
     fn OP_NULL(&mut self, instruction: &u16) {
@@ -443,41 +463,149 @@ impl Chip8 {
         }
     }
     fn cycle(&mut self) {
+        // Audio
         // self.opcode = ((self.memory[self.pc as usize] << 8) | self.memory[(self.pc+1) as usize]) as u16;
         self.opcode = ((self.memory[self.pc as usize] as u16) << 8) | self.memory[(self.pc+1) as usize] as u16;
 
         self.pc += 2;
 
         self.do_instruction();
+    }
+    fn do_sound(&mut self) {
 
         if self.delay_timer > 0 {
             self.delay_timer-=1;
         }
         if self.sound_timer > 0 {
+            self.sink.set_volume(100.0);
             self.sound_timer-=1;
+        } else {
+            self.sink.set_volume(0.0);
         }
     }
 }
-fn do_kbd_input(chip8: &Chip8) {
-    if is_key_down(KeyCode::) {
+fn do_kbd_input(chip8: &mut Chip8) {
+    // x
+    if is_key_down(KeyCode::X)  {
+        chip8.keypad[0] = 1;
+    } else {
+        chip8.keypad[0] = 0;
+    }
+    // 1
+    if is_key_down(KeyCode::Key1)  {
+        chip8.keypad[1] = 1;
+    } else {
+        chip8.keypad[1] = 0;
+    }
+    // 2
+    if is_key_down(KeyCode::Key2)  {
+        chip8.keypad[2] = 1;
+    } else {
+        chip8.keypad[2] = 0;
+    }
+    // 3
+    if is_key_down(KeyCode::Key3)  {
+        chip8.keypad[3] = 1;
+    } else {
+        chip8.keypad[3] = 0;
+    }
+    // Q
+    if is_key_down(KeyCode::Q)  {
+        chip8.keypad[4] = 1;
+    } else {
+        chip8.keypad[4] = 0;
+    }
+    // W
+    if is_key_down(KeyCode::W)  {
+        chip8.keypad[5] = 1;
+    } else {
+        chip8.keypad[5] = 0;
+    }
+    // E
+    if is_key_down(KeyCode::E)  {
+        chip8.keypad[6] = 1;
+    } else {
+        chip8.keypad[6] = 0;
+    }
+    // A
+    if is_key_down(KeyCode::A)  {
+        chip8.keypad[7] = 1;
+    } else {
+        chip8.keypad[7] = 0;
+    }
+    // S
+    if is_key_down(KeyCode::S)  {
+        chip8.keypad[8] = 1;
+    } else {
+        chip8.keypad[8] = 0;
+    }
+    // D
+    if is_key_down(KeyCode::D)  {
+        chip8.keypad[9] = 1;
+    } else {
+        chip8.keypad[9] = 0;
+    }
+    // Z
+    if is_key_down(KeyCode::Z)  {
+        chip8.keypad[0xA] = 1;
+    } else {
+        chip8.keypad[0xA] = 0;
+    }
+    // C
+    if is_key_down(KeyCode::C)  {
+        chip8.keypad[0xB] = 1;
+    } else {
+        chip8.keypad[0xB] = 0;
+    }
+    // 4
+    if is_key_down(KeyCode::Key4)  {
+        chip8.keypad[0xC] = 1;
+    } else {
+        chip8.keypad[0xC] = 0;
+    }
+    // R
+    if is_key_down(KeyCode::R)  {
+        chip8.keypad[0xD] = 1;
+    } else {
+        chip8.keypad[0xD] = 0;
+    }
+    // F
+    if is_key_down(KeyCode::F)  {
+        chip8.keypad[0xE] = 1;
+    } else {
+        chip8.keypad[0xE] = 0;
+    }
+    // V
+    if is_key_down(KeyCode::V)  {
+        chip8.keypad[0xF] = 1;
+    } else {
+        chip8.keypad[0xF] = 0;
+    }
+}
+async fn do_graphics(vid_buffer: [u32; 64*32]) {
+    clear_background(COLOR_BG);
+    for i in 0..VIDEO_WIDTH {
+        for j in 0..VIDEO_HEIGHT {
+            if vid_buffer[(i as usize+(j as usize*VIDEO_WIDTH as usize)) as usize] != 0x0 {
+                let screen_size=cmp::min(screen_width() as u32, screen_height() as u32);
+                let pixel_size=70;
+                draw_rectangle(i as f32*(screen_size/64)as f32, j as f32*(screen_size/64)as f32, (screen_size/pixel_size)as f32, (screen_size/pixel_size)as f32, COLOR_MAIN);
+            }
+        }
     }
 }
 #[macroquad::main("Chip8")]
 async fn main() {
+    let args: Vec<String> = env::args().collect();
+    let file = &args[1];
     let mut chip8 = Chip8::new();
-    chip8.load_rom("/home/owner/Projects/emulator/roms/tetris.ch8").expect("Failed to load file");
+    chip8.load_rom(&file).expect("Failed to load file");
     loop{
-        do_kbd_input(&chip8);
-        chip8.cycle();
-        clear_background(COLOR_BG);
-        for i in 0..VIDEO_WIDTH {
-            for j in 0..VIDEO_HEIGHT {
-                if chip8.video[(i as usize+(j as usize*VIDEO_WIDTH as usize)) as usize] != 0x0 {
-                    let screen_size=cmp::min(screen_width() as u32, screen_height() as u32);
-                    let pixel_size=70;
-                    draw_rectangle(i as f32*(screen_size/64)as f32, j as f32*(screen_size/64)as f32, (screen_size/pixel_size)as f32, (screen_size/pixel_size)as f32, COLOR_MAIN);
-                }
-            }
+        do_graphics(chip8.video).await;
+        chip8.do_sound();
+        for _ in 0..INSTRUCTIONS_PER_FRAME {
+            do_kbd_input(&mut chip8);
+            chip8.cycle();
         }
         next_frame().await
     }
